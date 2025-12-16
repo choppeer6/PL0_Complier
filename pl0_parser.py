@@ -55,18 +55,40 @@ class Parser:
         tx0 = tx # 保存当前符号表指针
         
         self.sym_table[tx].addr = len(self.code) # 记录过程入口地址
-        
-        # 【修复点】：必须先生成一条占位的 INT 指令，否则列表长度不够，后面回填会报错
         self.gen(OpCode.INT, 0, 0)
+        # 【修复点】：必须先生成一条占位的 INT 指令，否则列表长度不够，后面回填会报错
+# [修改前] 原始的有问题的逻辑
+        # if self.curr_sym == 'CONST':
+        #     self.advance()
+        #     while True:
+        #         name = self.curr_val; self.expect('ID')
+        #         self.expect('SYMBOL'); num = int(self.curr_val); self.expect('NUMBER')
+        #         self.sym_table.append(Symbol(name, 'const', val=num)) 
+        #         if not self.accept('SYMBOL'): break  <-- 问题在这里，会错误吃掉分号并继续
+
+        # [修改后] 正确的逻辑 (仿照您的 VAR 写法)
         if self.curr_sym == 'CONST':
             self.advance()
             while True:
-                name = self.curr_val; self.expect('ID')
-                self.expect('SYMBOL'); num = int(self.curr_val); self.expect('NUMBER')
-                #self.sym_table.append(Symbol('const', val=num)) # 入符号表
-                self.sym_table.append(Symbol(name, 'const', val=num)) 
-                if not self.accept('SYMBOL'): break
-
+                name = self.curr_val
+                self.expect('ID')
+                self.expect('SYMBOL') # expect '=' or other symbol
+                # 注意：这里最好检查一下是不是 '='，不过简单起见先维持原样
+                
+                num = int(self.curr_val)
+                self.expect('NUMBER')
+                self.sym_table.append(Symbol(name, 'const', val=num))
+                
+                # --- 修复开始 ---
+                if self.curr_sym == 'SYMBOL' and self.curr_val == ',':
+                    self.advance() # 吃掉逗号，继续解析下一个常量
+                    continue
+                elif self.curr_sym == 'SYMBOL' and self.curr_val == ';':
+                    self.advance() # 吃掉分号，结束常量声明
+                    break
+                else:
+                    self.error("Expected ',' or ';' in const declaration")
+                # --- 修复结束 ---
         if self.curr_sym == 'VAR':
             self.advance()
             while True:
@@ -89,6 +111,8 @@ class Parser:
             name = self.curr_val; self.expect('ID'); self.expect('SYMBOL') # ';'
             self.sym_table.append(Symbol('proc', level, len(self.code))) # 记录过程
             self.block(level + 1, len(self.sym_table) - 1) # 递归编译过程
+            #  回填：用计算出的 dx (栈帧大小) 覆盖占位指令 
+            self.code[self.sym_table[tx0].addr] = Instruction(OpCode.INT, 0, dx)
             self.expect('SYMBOL') # ';'
         
         # 修正过程调用的跳转地址 (回填)

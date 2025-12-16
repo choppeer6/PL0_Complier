@@ -15,7 +15,7 @@ with st.sidebar:
     st.header("关于本项目")
     st.info(
         """
-        这是一个基于 **Python** 实现的教学用 **PL/0 编译器**。
+        这是一个基于 **Python** 实现的 **PL/0 编译器**。
         
         它包含了编译器的完整四个阶段：
         1. **词法分析** (Lexer)
