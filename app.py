@@ -1,6 +1,6 @@
 import streamlit as st
 from pl0_lexer import Lexer
-from pl0_parser import Parser
+from pl0_parser import SLRParser
 from pl0_vm import VM
 
 # 设置页面标题和布局
@@ -66,7 +66,7 @@ with col1:
 
     if run_button:
         try:
-            # 1. 词法分析
+            # 1. 词法分析（仅保存 tokens，不在此重复展示）
             lexer = Lexer(code_input)
             tokens = lexer.get_tokens()
             st.session_state['tokens'] = tokens
@@ -98,10 +98,77 @@ with col2:
     with tab1:
         st.caption("将源代码分解为 Token 流：")
         if 'tokens' in st.session_state:
-            st.dataframe(st.session_state['tokens'], use_container_width=True, column_config={
-                0: "Token 类型",
-                1: "Token 值"
-            })
+            # 构建带行号的 token 表格：优先使用 token 内置行号字段，否则尝试在源码中定位 token 值推断行号
+            tokens = st.session_state['tokens']
+            src_text = code_input if 'code_input' in locals() else ""
+            rows = []
+            cur_pos = 0
+            for t in tokens:
+                line_no = 0
+                t_type = ""
+                t_val = ""
+                # 支持多种 token 表示形式
+                if isinstance(t, tuple) or isinstance(t, list):
+                    if len(t) >= 2:
+                        t_type = t[0]
+                        t_val = t[1]
+                    # 常见的行号位置（tuple 中）
+                    if len(t) >= 3 and isinstance(t[2], int):
+                        line_no = t[2]
+                    elif len(t) >= 4 and isinstance(t[3], int):
+                        line_no = t[3]
+                elif isinstance(t, dict):
+                    t_type = t.get('type', '')
+                    t_val = t.get('value', '')
+                    if 'line' in t and isinstance(t['line'], int):
+                        line_no = t['line']
+                    elif 'lineno' in t and isinstance(t['lineno'], int):
+                        line_no = t['lineno']
+                else:
+                    # 对象式 token（可能有属性）
+                    t_type = getattr(t, 'type', str(type(t)))
+                    t_val = getattr(t, 'value', str(t))
+                    if hasattr(t, 'line') and isinstance(getattr(t, 'line'), int):
+                        line_no = getattr(t, 'line')
+                    elif hasattr(t, 'lineno') and isinstance(getattr(t, 'lineno'), int):
+                        line_no = getattr(t, 'lineno')
+                
+                # 如果没有行号，尝试在源码中定位 token 值（从上次位置开始查找，避免重复匹配）
+                if not line_no and isinstance(t_val, str) and src_text:
+                    try:
+                        idx = src_text.find(t_val, cur_pos)
+                        if idx != -1:
+                            line_no = src_text.count('\n', 0, idx) + 1
+                            cur_pos = idx + max(1, len(t_val))
+                    except Exception:
+                        line_no = 0
+
+                rows.append({"行": line_no, "Token 类型": t_type, "Token 值": t_val})
+            
+            # 显示表格（防止 column_config 导致的错误，不使用额外配置）
+            st.dataframe(rows, use_container_width=True)
+            # 提示：若需要不同列名或格式，可调整上方 rows 构造逻辑
+
+            # 把“语法解析（Parse Only）”按钮放在词法展示之后
+            if st.button("🔍 语法解析 (Parse Only)", key="parse_in_tab"):
+                try:
+                    tokens = st.session_state['tokens']
+                    parser = SLRParser(tokens)
+                    parser.parse()
+                    st.success("✅ 语法检查通过（符合文法）")
+                    st.session_state['parse_ok'] = True
+                    # 清理之前的错误/结果展示
+                    if 'result' in st.session_state:
+                        del st.session_state['result']
+                    if 'p_code' in st.session_state:
+                        del st.session_state['p_code']
+                except SyntaxError as se:
+                    st.error(f"❌ 语法错误: {se}")
+                    st.session_state['parse_ok'] = False
+                except Exception as e:
+                    st.error(f"❌ 解析失败: {e}")
+                    st.session_state['parse_ok'] = False
+
         else:
             st.info("请点击左侧按钮开始编译...")
     
@@ -131,7 +198,7 @@ with col2:
         if 'result' in st.session_state:
             st.code(st.session_state['result'], language="text")
             if not st.session_state['result']:
-                st.warning("程序运行完毕，但没有产生输出 (是否忘记使用 write 指令?)")
+                st.warning("程序运行完毕，但没有产生输出 ( 是否忘记使用 write 指令? )")
         else:
             st.info("等待运行...")
 

@@ -1,255 +1,368 @@
-from pl0_types import OpCode, Instruction, OPR_MAP
+# 实现：使用 SLR 算法进行纯语法分析（无语义动作、无代码生成）
+# 输入：tokens 列表，元素为 (sym_type, sym_val)
+from collections import defaultdict, deque
 
-class Symbol:
-    def __init__(self,name, kind, level=0, addr=0, val=0):
-        self.name = name
-        self.kind = kind  # 'const', 'var', 'proc'
-        self.level = level
-        self.addr = addr
-        self.val = val
-
-class Parser:
+class SLRParser:
     def __init__(self, tokens):
         self.tokens = tokens
-        self.idx = 0
-        self.code = []       # 生成的目标代码
-        self.sym_table = []  # 符号表
-        self.error_msg = ""
-        
-        # 当前 Token
-        self.curr_sym = None
-        self.curr_val = None
-        self.advance()
+        self.terminals = set()
+        self.nonterminals = set()
+        self.productions = []  # list of (LHS, RHS_list)
+        self.start_symbol = 'S'
+        self._build_grammar()
+        self._collect_symbols()
+        self._augment_grammar()
+        self.states = []
+        self.goto_table = {}
+        self.action = {}
+        self._build_canonical_collection()
+        self._compute_first_follow()
+        self._build_parsing_table()
 
-    def advance(self):
-        if self.idx < len(self.tokens):
-            self.curr_sym, self.curr_val = self.tokens[self.idx]
-            self.idx += 1
-        else:
-            self.curr_sym = None
+    # -------------------- 语法定义（简化 PL/0 子集） --------------------
+    def _build_grammar(self):
+        # 非终结符和产生式（简化版 PL/0 语法，主要用于语法分析验证）
+        G = [
+            ('program', ['block', '.']),
+            ('block', ['consts', 'vars', 'procs', 'statement']),
+            ('consts', []),
+            ('consts', ['CONST', 'const_list', ';']),
+            ('const_list', ['ID', '=', 'NUMBER', 'const_list_tail']),
+            ('const_list_tail', []),
+            ('const_list_tail', [',', 'ID', '=', 'NUMBER', 'const_list_tail']),
+            ('vars', []),
+            ('vars', ['VAR', 'id_list', ';']),
+            ('id_list', ['ID', 'id_list_tail']),
+            ('id_list_tail', []),
+            ('id_list_tail', [',', 'ID', 'id_list_tail']),
+            ('procs', []),
+            ('procs', ['PROCEDURE', 'ID', ';', 'block', ';', 'procs']),
+            ('statement', []),  # empty statement allowed
+            ('statement', ['ID', 'ASSIGN', 'expression']),
+            ('statement', ['CALL', 'ID']),
+            ('statement', ['BEGIN', 'stmt_list', 'END']),
+            ('statement', ['IF', 'condition', 'THEN', 'statement']),
+            ('statement', ['WHILE', 'condition', 'DO', 'statement']),
+            ('statement', ['READ', '(', 'ID', ')']),
+            ('statement', ['WRITE', '(', 'expression', ')']),
+            ('stmt_list', ['statement', 'stmt_list_tail']),
+            ('stmt_list_tail', []),
+            ('stmt_list_tail', [';', 'statement', 'stmt_list_tail']),
+            ('expression', ['term', 'expression_tail']),
+            ('expression_tail', []),
+            ('expression_tail', ['+', 'term', 'expression_tail']),
+            ('expression_tail', ['-', 'term', 'expression_tail']),
+            ('term', ['factor', 'term_tail']),
+            ('term_tail', []),
+            ('term_tail', ['*', 'factor', 'term_tail']),
+            ('term_tail', ['/', 'factor', 'term_tail']),
+            ('factor', ['ID']),
+            ('factor', ['NUMBER']),
+            ('factor', ['(', 'expression', ')']),
+            ('condition', ['ODD', 'expression']),
+            ('condition', ['expression', 'relop', 'expression']),
+            ('relop', ['=']),
+            ('relop', ['#']),
+            ('relop', ['<']),
+            ('relop', ['>']),
+            ('relop', ['<=']),
+            ('relop', ['>=']),
+        ]
+        # store productions
+        self.productions = G
 
-    def gen(self, f, l, a):
-        """生成一条 P-code 指令"""
-        self.code.append(Instruction(f, l, a))
+    def _collect_symbols(self):
+        for lhs, rhs in self.productions:
+            self.nonterminals.add(lhs)
+            for sym in rhs:
+                if sym.isupper() and sym not in ('=', '+', '-', '*', '/', ',', ';', '.', '(', ')', '<=', '>=', '<', '>', '#'):
+                    pass
+        all_rhs_syms = set(sym for _, rhs in self.productions for sym in rhs)
+        # terminals = rhs_symbols - nonterminals
+        self.terminals = set(s for s in all_rhs_syms if s not in self.nonterminals)
 
-    def error(self, msg):
-        raise Exception(f"Syntax Error: {msg} at token {self.curr_val}")
+    def _augment_grammar(self):
+        # add S' -> S
+        self.productions.insert(0, (self.start_symbol, ['program']))
+        # ensure start symbol is known as a nonterminal
+        self.nonterminals.add(self.start_symbol)
+        # keep track: productions indexed
+        self.prod_index = list(range(len(self.productions)))
 
-    def accept(self, sym_type):
-        if self.curr_sym == sym_type:
-            self.advance()
-            return True
-        return False
+    # -------------------- LR(0) items / 状态集合构造 --------------------
+    def _closure(self, items):
+        closure = set(items)
+        added = True
+        while added:
+            added = False
+            new_items = set()
+            for (lhs, rhs, dot) in closure:
+                if dot < len(rhs):
+                    B = rhs[dot]
+                    if B in self.nonterminals:
+                        for (p_lhs, p_rhs) in self.productions:
+                            if p_lhs == B:
+                                itm = (p_lhs, tuple(p_rhs), 0)
+                                if itm not in closure:
+                                    new_items.add(itm)
+            if new_items:
+                closure |= new_items
+                added = True
+        return frozenset(closure)
 
-    def expect(self, sym_type):
-        if self.curr_sym == sym_type:
-            self.advance()
-        else:
-            self.error(f"Expected {sym_type}")
+    def _goto(self, state, X):
+        moved = set()
+        for (lhs, rhs, dot) in state:
+            if dot < len(rhs) and rhs[dot] == X:
+                moved.add((lhs, rhs, dot + 1))
+        if not moved:
+            return None
+        return self._closure(moved)
 
-    # --- 语法规则实现 ---
-
-    def block(self, level, tx):
-
-        dx = 3 # 栈帧保留空间：Static Link, Dynamic Link, Return Address
-        tx0 = tx # 保存当前符号表指针
-        
-        self.sym_table[tx].addr = len(self.code) # 记录过程入口地址
-        self.gen(OpCode.INT, 0, 0)
-        # 【修复点】：必须先生成一条占位的 INT 指令，否则列表长度不够，后面回填会报错
-# [修改前] 原始的有问题的逻辑
-        # if self.curr_sym == 'CONST':
-        #     self.advance()
-        #     while True:
-        #         name = self.curr_val; self.expect('ID')
-        #         self.expect('SYMBOL'); num = int(self.curr_val); self.expect('NUMBER')
-        #         self.sym_table.append(Symbol(name, 'const', val=num)) 
-        #         if not self.accept('SYMBOL'): break  <-- 问题在这里，会错误吃掉分号并继续
-
-        # [修改后] 正确的逻辑 (仿照您的 VAR 写法)
-        if self.curr_sym == 'CONST':
-            self.advance()
-            while True:
-                name = self.curr_val
-                self.expect('ID')
-                self.expect('SYMBOL') # expect '=' or other symbol
-                # 注意：这里最好检查一下是不是 '='，不过简单起见先维持原样
-                
-                num = int(self.curr_val)
-                self.expect('NUMBER')
-                self.sym_table.append(Symbol(name, 'const', val=num))
-                
-                # --- 修复开始 ---
-                if self.curr_sym == 'SYMBOL' and self.curr_val == ',':
-                    self.advance() # 吃掉逗号，继续解析下一个常量
+    def _items(self):
+        # productions need to be tuples for items
+        prods = [(lhs, tuple(rhs)) for lhs, rhs in self.productions]
+        # initial item S' -> . program
+        start_item = (self.start_symbol, tuple(self.productions[0][1]), 0)
+        I0 = self._closure([start_item])
+        C = [I0]
+        queue = deque([I0])
+        transitions = {}
+        while queue:
+            I = queue.popleft()
+            syms = set()
+            for (lhs, rhs, dot) in I:
+                if dot < len(rhs):
+                    syms.add(rhs[dot])
+            for X in syms:
+                J = self._goto(I, X)
+                if J is None:
                     continue
-                elif self.curr_sym == 'SYMBOL' and self.curr_val == ';':
-                    self.advance() # 吃掉分号，结束常量声明
+                if J not in C:
+                    C.append(J)
+                    queue.append(J)
+                transitions[(C.index(I), X)] = C.index(J)
+        return C, transitions
+
+    def _build_canonical_collection(self):
+
+        self.productions = [(lhs, tuple(rhs)) for lhs, rhs in self.productions]
+        C, transitions = self._items()
+        self.states = C
+        self.transitions = transitions
+
+    # -------------------- FIRST / FOLLOW 计算 --------------------
+    def _compute_first_follow(self):
+        # FIRST
+        self.FIRST = {nt: set() for nt in self.nonterminals}
+
+        def first_of_sequence(seq):
+            res = set()
+            if not seq:
+                res.add('')  
+                return res
+            for sym in seq:
+                if sym in self.terminals:
+                    res.add(sym)
                     break
+                elif sym in self.nonterminals:
+                    res |= (self.FIRST[sym] - set(['']))
+                    if '' in self.FIRST[sym]:
+                        continue
+                    else:
+                        break
                 else:
-                    self.error("Expected ',' or ';' in const declaration")
-                # --- 修复结束 ---
-        if self.curr_sym == 'VAR':
-            self.advance()
-            while True:
-                name = self.curr_val
-                self.expect('ID')
-                self.sym_table.append(Symbol(name,'var', level, dx))
-                dx += 1
-                
-                # 核心修改：明确检查是逗号还是分号
-                if self.curr_sym == 'SYMBOL' and self.curr_val == ',':
-                    self.advance() # 吃掉逗号，继续循环解析下一个变量
-                    continue
-                elif self.curr_sym == 'SYMBOL' and self.curr_val == ';':
-                    self.advance() # 吃掉分号，结束变量声明
+                  
+                    res.add(sym)
                     break
+            else:
+                res.add('')
+            return res
+
+        changed = True
+        while changed:
+            changed = False
+            for lhs, rhs in self.productions:
+                lhs = lhs
+                rhs_list = list(rhs)
+                before = set(self.FIRST[lhs])
+                if not rhs_list:
+                    self.FIRST[lhs].add('')
                 else:
-                    self.error("Expected ',' or ';' in var declaration")
-        while self.curr_sym == 'PROCEDURE':
-            self.advance()
-            name = self.curr_val; self.expect('ID'); self.expect('SYMBOL') # ';'
-            self.sym_table.append(Symbol('proc', level, len(self.code))) # 记录过程
-            self.block(level + 1, len(self.sym_table) - 1) # 递归编译过程
-            #  回填：用计算出的 dx (栈帧大小) 覆盖占位指令 
-            self.code[self.sym_table[tx0].addr] = Instruction(OpCode.INT, 0, dx)
-            self.expect('SYMBOL') # ';'
-        
-        # 修正过程调用的跳转地址 (回填)
-        # 这是一个简化版，完整的 PL/0 会在过程开始生成 JMP，这里直接生成 INT
-        self.code[self.sym_table[tx0].addr] = Instruction(OpCode.INT, 0, dx)
-        self.statement(level)
-        self.gen(OpCode.OPR, 0, 0) # Return
+                    fo = first_of_sequence(rhs_list)
+                    self.FIRST[lhs] |= fo
+                if self.FIRST[lhs] != before:
+                    changed = True
 
-    def statement(self, level):
-        if self.curr_sym == 'ID': # Assignment
-            # 查找符号表
-            #sym = next((s for s in reversed(self.sym_table) if isinstance(s, Symbol)), None)
-            # 简化：假设找到了并且是 var (实际需按名字查找)
-            # 真实实现需遍历符号表匹配 name
-            
-            # 为了演示，这里做极其简化的处理：假设最近的一个ID匹配
-            # 实际代码需要完善符号查找逻辑 (find_symbol)
-            pass 
-            # self.expression(level)
-            # self.gen(OpCode.STO, level - sym.level, sym.addr)
-            name = self.curr_val
-            # 由于符号表查找逻辑较长，这里仅展示结构
-            self.advance()
-            self.expect('ASSIGN')
-            self.expression(level)
+        # FOLLOW
+        self.FOLLOW = {nt: set() for nt in self.nonterminals}
+        self.FOLLOW[self.start_symbol].add('$')
+        changed = True
+        while changed:
+            changed = False
+            for lhs, rhs in self.productions:
+                rhs_list = list(rhs)
+                for i, B in enumerate(rhs_list):
+                    if B in self.nonterminals:
+                        beta = rhs_list[i+1:]
+                        first_beta = set()
+                        if beta:
+                            for sym in beta:
+                                if sym in self.terminals:
+                                    first_beta.add(sym)
+                                    break
+                                elif sym in self.nonterminals:
+                                    first_beta |= (self.FIRST[sym] - set(['']))
+                                    if '' in self.FIRST[sym]:
+                                        continue
+                                    else:
+                                        break
+                                else:
+                                    first_beta.add(sym)
+                                    break
+                            else:
+                                first_beta.add('')
+                        else:
+                            first_beta.add('')
+                        before = set(self.FOLLOW[B])
+                        if '' in first_beta:
+                            self.FOLLOW[B] |= (self.FOLLOW[lhs] | (first_beta - set([''])))
+                        else:
+                            self.FOLLOW[B] |= first_beta
+                        if self.FOLLOW[B] != before:
+                            changed = True
 
-            sym = self.find_symbol(name)
-            if sym.kind != 'var': self.error("Assignment to non-variable")
-            self.gen(OpCode.STO, level - sym.level, sym.addr)
+    # -------------------- 构建 ACTION / GOTO 表 (SLR) --------------------
+    def _build_parsing_table(self):
+        # init
+        N = len(self.states)
+        self.action = [defaultdict(lambda: None) for _ in range(N)]
+        self.goto = [defaultdict(lambda: None) for _ in range(N)]
 
-        elif self.curr_sym == 'CALL':
-            self.advance(); self.expect('ID')
-            self.gen(OpCode.CAL, 0, 0) # 同样需要符号表查找地址
 
-        elif self.curr_sym == 'BEGIN':
-            self.advance()
-            self.statement(level)
-            while self.curr_sym == 'SYMBOL' and self.curr_val == ';':
-                self.advance()
-                self.statement(level)
-            self.expect('END')
+        prod_list = list(self.productions)
 
-        elif self.curr_sym == 'IF':
-            self.advance(); self.condition(level); self.expect('THEN')
-            cx1 = len(self.code); self.gen(OpCode.JPC, 0, 0)
-            self.statement(level)
-            self.code[cx1].a = len(self.code) # 回填地址
+        for i, I in enumerate(self.states):
 
-        elif self.curr_sym == 'WHILE':
-            cx1 = len(self.code)
-            self.advance(); self.condition(level); self.expect('DO')
-            cx2 = len(self.code); self.gen(OpCode.JPC, 0, 0)
-            self.statement(level)
-            self.gen(OpCode.JMP, 0, cx1)
-            self.code[cx2].a = len(self.code)
-        
-        elif self.curr_sym == 'READ':
-             self.advance(); self.expect('SYMBOL'); # '('
-             self.expect('ID'); # 实际应查找变量
-             self.expect('SYMBOL'); # ')'
-             self.gen(OpCode.RED, 0, 0) # Read into stack top
-             self.gen(OpCode.STO, 0, 0) # Store to var
+            symbols_after_dot = set()
+            for (lhs, rhs, dot) in I:
+                if dot < len(rhs):
+                    a = rhs[dot]
+                    if a in self.terminals or a not in self.nonterminals:
+                        # terminal
+                        to_state = self.transitions.get((i, a))
+                        if to_state is not None:
+                            self.action[i][a] = ('s', to_state)
+                else:
 
-        elif self.curr_sym == 'WRITE':
-            self.advance(); self.expect('SYMBOL'); 
-            self.expression(level)
-            self.expect('SYMBOL')
-            self.gen(OpCode.WRT, 0, 0)
+                    if lhs == self.start_symbol:
+                        # accept on $
+                        self.action[i]['$'] = ('acc',)
+                    else:
 
-    def expression(self, level):
-        # 简单处理：term { + term }
-        self.term(level)
-        while self.curr_sym == 'SYMBOL' and self.curr_val in ['+', '-']:
-            op = self.curr_val
-            self.advance()
-            self.term(level)
-            self.gen(OpCode.OPR, 0, OPR_MAP[op])
+                        for idx, prod in enumerate(prod_list):
+                            if prod[0] == lhs and tuple(prod[1]) == tuple(rhs):
+                                prod_idx = idx
+                                break
+                        else:
+                            continue
+                        for a in self.FOLLOW[lhs]:
 
-    def term(self, level):
-        self.factor(level)
-        while self.curr_sym == 'SYMBOL' and self.curr_val in ['*', '/']:
-            op = self.curr_val
-            self.advance()
-            self.factor(level)
-            self.gen(OpCode.OPR, 0, OPR_MAP[op])
+                            if self.action[i][a] is None:
+                                self.action[i][a] = ('r', prod_idx)
 
-    def factor(self, level):
-        if self.curr_sym == 'ID':
-            name = self.curr_val
-            sym = self.find_symbol(name)
-            
-            # --- 修复开始：补充缺失的代码生成和指针移动 ---
-            if sym.kind == 'const':
-                self.gen(OpCode.LIT, 0, sym.val)
-            elif sym.kind == 'var':
-                self.gen(OpCode.LOD, level - sym.level, sym.addr)
-            
-            self.advance() # <--- 关键！必须吃掉这个变量名，进入下一个 Token
-            # --- 修复结束 ---
-            
-        elif self.curr_sym == 'NUMBER':
-            self.gen(OpCode.LIT, 0, int(self.curr_val))
-            self.advance()
-        elif self.curr_sym == 'SYMBOL' and self.curr_val == '(':
-            self.advance()
-            self.expression(level)
-            self.expect('SYMBOL') # ')'
+            for A in self.nonterminals:
+                to = self.transitions.get((i, A))
+                if to is not None:
+                    self.goto[i][A] = to
 
-    def condition(self, level):
-        if self.curr_sym == 'ODD':
-            self.advance(); self.expression(level); self.gen(OpCode.OPR, 0, 6)
-        else:
-            self.expression(level)
-            if self.curr_sym == 'SYMBOL' and self.curr_val in ['=', '#', '<', '>', '<=', '>=']:
-                op = self.curr_val
-                self.advance()
-                self.expression(level)
-                self.gen(OpCode.OPR, 0, OPR_MAP[op])
+    # -------------------- 解析接口 --------------------
+    def _token_to_terminal(self, token):
+        # token: (sym_type, sym_val)
+        if token is None:
+            return '$'
+        sym_type, sym_val = token
+        if sym_type == 'SYMBOL':
+            return sym_val  # use actual punctuation as terminal
+        return sym_type
 
     def parse(self):
-        # 初始化主程序 Block
-        # 符号表 placeholder
-        self.sym_table.append(Symbol('proc', -1, 0)) 
-        
-        # JMP to main entry (will be fixed later)
-        self.gen(OpCode.JMP, 0, 0) 
-        
-        # 这里为了演示，我们只解析一个 Block
-        # 真正的 PL/0 应该在 Block 之后加 "."
-        self.block(0, 0)
-        self.code[0].a = 1 # Update jump to main block start
-        return self.code
-    
-    #符号查找逻辑
-    def find_symbol(self, name):
-        # 倒序查找，保证最近的作用域优先
-        for sym in reversed(self.sym_table):
-            if sym.name == name:
-                return sym
-        self.error(f"Undefined symbol: {name}")
+        terms = [self._token_to_terminal(t) for t in self.tokens]
+        terms.append('$')
+        stack = [0]
+        ip = 0
+        while True:
+            state = stack[-1]
+            a = terms[ip]
+            act = self.action[state].get(a)
+            if act is None:
+                # 优先尝试从 token 中提取行号信息，若存在则在错误信息中显示行号
+                tok = self.tokens[ip] if ip < len(self.tokens) else None
+                line_no = None
+                try:
+                    if isinstance(tok, (tuple, list)):
+                        # 常见约定： (type, value, line) 或 (type, value, ..., line)
+                        for idx in range(2, min(len(tok), 6)):
+                            if isinstance(tok[idx], int):
+                                line_no = tok[idx]
+                                break
+                    elif isinstance(tok, dict):
+                        for k in ('line', 'lineno', 'start_line', 'row', 'line_no'):
+                            if k in tok and isinstance(tok[k], int):
+                                line_no = tok[k]
+                                break
+                    else:
+                        for attr in ('line', 'lineno', 'start_line', 'row', 'line_no'):
+                            ln = getattr(tok, attr, None)
+                            if isinstance(ln, int):
+                                line_no = ln
+                                break
+                except Exception:
+                    line_no = None
+
+                if line_no is not None:
+                    raise SyntaxError(f"Unexpected token {tok} at line {line_no}")
+                else:
+                    raise SyntaxError(f"Unexpected token {tok} at position {ip}")
+            if act[0] == 's':
+                stack.append(act[1])
+                ip += 1
+            elif act[0] == 'r':
+                prod_idx = act[1]
+                lhs, rhs = self.productions[prod_idx]
+                rhs_len = len(rhs)
+                if rhs_len > 0:
+                    for _ in range(rhs_len):
+                        stack.pop()
+                state_t = stack[-1]
+                goto_state = self.goto[state_t].get(lhs)
+                if goto_state is None:
+                    raise SyntaxError(f"Invalid goto after reduction by {lhs} -> {list(rhs)}")
+                stack.append(goto_state)
+            elif act[0] == 'acc':
+                return True
+            else:
+                raise SyntaxError("Unknown action in parsing table")
+
+# -------------------- 对外接口 --------------------
+def parse_tokens_with_slr(tokens):
+    """
+    tokens: list of (sym_type, sym_val)
+    返回: True 表示语法合法，抛出 SyntaxError 表示语法错误
+    """
+    parser = SLRParser(tokens)
+    return parser.parse()
+
+# 若作为模块直接运行，做一个简单自检（不会执行实际文件操作）
+if __name__ == "__main__":
+    # 简单测试：一个非常简化的程序 token 序列 (对应: BEGIN END .)
+    sample = [
+        ('BEGIN', 'BEGIN'),
+        ('END', 'END'),
+        ('SYMBOL', '.'),
+    ]
+    try:
+        ok = parse_tokens_with_slr(sample)
+        print("Parse OK" if ok else "Parse Failed")
+    except Exception as e:
+        print("Parse error:", e)
