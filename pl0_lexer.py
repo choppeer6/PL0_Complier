@@ -1,76 +1,79 @@
 import re
-from typing import List, NamedTuple, Optional
+from typing import List, NamedTuple
 
 # ==========================================
-# 1. 配置与定义
+# 1. 配置与常量定义
 # ==========================================
 
 # PL/0 虚拟机通常基于栈，限制整数为 32 位有符号整数
-MAX_INT = 2147483647  # 2^31 - 1
+MAX_INT = 2147483647 
 
 class Token(NamedTuple):
-    type: str       # Token 类型
-    value: str      # Token 值
+    type: str       # Token 类型 (如 BEGIN, ID, NUMBER)
+    value: str      # Token 的实际文本值
     line: int       # 行号
     column: int     # 列号
 
+# 关键字集合 (全部大写，用于忽略大小写匹配)
 KEYWORDS = {
     'BEGIN', 'CALL', 'CONST', 'DO', 'END', 'IF', 'ODD',
     'PROCEDURE', 'READ', 'THEN', 'VAR', 'WHILE', 'WRITE'
 }
 
 # ==========================================
-# 2. 增强版 Lexer 类
+# 2. 词法分析器核心类
 # ==========================================
 
 class Lexer:
     def __init__(self, source_code: str):
         self.source = source_code
         self.tokens: List[Token] = []
-        self.errors: List[str] = []  # 【新功能】用于存储错误列表
+        self.errors: List[str] = []  # 存储词法错误信息
         self.regex = self._compile_regex()
         
     def _compile_regex(self):
+        """编译正则表达式规则，注意顺序很重要"""
         token_spec = [
-            ('COMMENT',  r'\(\*.*?\*\)'),   # 注释 (* ... *)
-            ('ASSIGN',   r':='),            # :=
-            ('LE',       r'<='),            # <=
-            ('GE',       r'>='),            # >=
+            ('COMMENT',  r'\(\*.*?\*\)'),   # 注释 (* ... *)，非贪婪匹配
+            ('ASSIGN',   r':='),            # 赋值符号 := (必须在冒号前)
+            ('LE',       r'<='),            # 小于等于 <= (必须在小于号前)
+            ('GE',       r'>='),            # 大于等于 >= (必须在大于号前)
             ('NUMBER',   r'\d+'),           # 数字
             ('ID',       r'[A-Za-z][A-Za-z0-9]*'), # 标识符
-            ('NEWLINE',  r'\n'),            # 换行
-            ('SKIP',     r'[ \t\r]+'),      # 空白
-            ('PLUS',     r'\+'),
-            ('MINUS',    r'-'),
-            ('TIMES',    r'\*'),
-            ('SLASH',    r'/'),
-            ('LPAREN',   r'\('),
-            ('RPAREN',   r'\)'),
-            ('EQ',       r'='),
-            ('NE',       r'#'), 
-            ('LT',       r'<'),
-            ('GT',       r'>'),
-            ('COMMA',    r','),
-            ('PERIOD',   r'\.'),
-            ('SEMICOLON', r';'),
-            ('MISMATCH', r'.'),             # 非法字符
+            ('NEWLINE',  r'\n'),            # 换行符
+            ('SKIP',     r'[ \t\r]+'),      # 空白符(空格、制表符)
+            ('PLUS',     r'\+'),            # 加号
+            ('MINUS',    r'-'),             # 减号
+            ('TIMES',    r'\*'),            # 乘号
+            ('SLASH',    r'/'),             # 除号
+            ('LPAREN',   r'\('),            # 左括号
+            ('RPAREN',   r'\)'),            # 右括号
+            ('EQ',       r'='),             # 等号
+            ('NE',       r'#'),             # 不等于
+            ('LT',       r'<'),             # 小于
+            ('GT',       r'>'),             # 大于
+            ('COMMA',    r','),             # 逗号
+            ('PERIOD',   r'\.'),            # 句号
+            ('SEMICOLON', r';'),            # 分号
+            ('MISMATCH', r'.'),             # 兜底匹配：任何未被识别的字符
         ]
+        # 使用 DOTALL 模式以便 . 能匹配换行(主要用于多行注释)
         tok_regex = '|'.join('(?P<%s>%s)' % pair for pair in token_spec)
         return re.compile(tok_regex, re.DOTALL)
 
     def tokenize(self):
-        """执行词法分析"""
+        """执行词法分析，生成详细的 Token 对象列表"""
         self.tokens = []
-        self.errors = [] # 每次重新分析时清空错误
+        self.errors = [] 
         line_num = 1
         line_start = 0
 
         for mo in self.regex.finditer(self.source):
             kind = mo.lastgroup
             value = mo.group()
+            # 计算列号：当前位置 - 当前行起始位置 + 1
             column = mo.start() - line_start + 1
 
-            # --- 处理跳过和换行 ---
             if kind == 'SKIP':
                 continue
             elif kind == 'NEWLINE':
@@ -78,124 +81,67 @@ class Lexer:
                 line_start = mo.end()
                 continue
             elif kind == 'COMMENT':
+                # 处理跨行注释，需要更新行号
                 newlines = value.count('\n')
                 if newlines > 0:
                     line_num += newlines
                     line_start = mo.end() - (len(value) - value.rfind('\n') - 1)
                 continue
 
-            # --- 【新功能 #4】数值检查 ---
             elif kind == 'NUMBER':
-                # 虽然是数字，但需要检查是否溢出
+                # 数值溢出检查
                 try:
                     num_val = int(value)
                     if num_val > MAX_INT:
-                        self._record_error(f"Number overflow: '{value}' exceeds {MAX_INT}", line_num, column)
-                        # 即使溢出，我们通常还是生成 Token，
-                        # 这样语法分析器(Parser)不会因为缺 Token 而报错，后续语义分析再拦截即可。
+                        self._record_error(f"数值溢出: '{value}' 超过最大值 {MAX_INT}", line_num, column)
                 except ValueError:
-                    self._record_error(f"Invalid number format: {value}", line_num, column)
+                    self._record_error(f"无效数字: {value}", line_num, column)
 
-            # --- 关键字处理 ---
             elif kind == 'ID':
+                # 检查是否为关键字
                 upper_value = value.upper()
                 if upper_value in KEYWORDS:
                     kind = upper_value
 
-            # --- 【新功能 #2】错误恢复 ---
             elif kind == 'MISMATCH':
-                # 记录错误，但不抛出异常，也不中断循环
-                self._record_error(f"Unexpected character: '{value}'", line_num, column)
-                # 直接 continue，跳过这个字符，不生成 Token
+                # 记录错误但不崩溃，跳过该字符
+                self._record_error(f"非法字符: '{value}'", line_num, column)
                 continue
 
-            # 生成并添加 Token
             token = Token(kind, value, line_num, column)
             self.tokens.append(token)
 
         return self.tokens
 
     def _record_error(self, msg: str, line: int, col: int):
-        """辅助方法：格式化错误信息"""
-        error_msg = f"[Error] Line {line}, Column {col}: {msg}"
-        self.errors.append(error_msg)
+        self.errors.append(f"[词法错误] 第 {line} 行, 第 {col} 列: {msg}")
 
     def has_error(self) -> bool:
         return len(self.errors) > 0
 
-    def print_errors(self):
-        if not self.errors:
-            print("No lexical errors found.")
-        else:
-            print(f"Found {len(self.errors)} errors:")
-            for err in self.errors:
-                print(err)
-
     def get_tokens(self):
-        """返回 Parser 期望的 (sym, val) 对。
-        Parser 旧实现期望大多数标点/运算符使用通用的 'SYMBOL' 类型，
-        并用 value 保存实际字符（例如 ',' ';' '(' ')' '<=' '>=' 等）。
-        这个方法会在需要时调用 tokenize() 生成 tokens，然后做一次映射。
+        """
+        返回 Parser 需要的格式。
+        格式: [(类型, 值, 行号), ...]
+        这是为了让语法分析器在报错时能获取行号。
         """
         if not self.tokens:
             self.tokenize()
 
         mapped = []
         for t in self.tokens:
-            # 关键字已经被转换为大写类型（如 'VAR', 'BEGIN' 等）
-            if t.type in ('ASSIGN', 'NUMBER'):
-                # ASSIGN 和 NUMBER 在 Parser 中有专门类型
-                mapped.append((t.type, t.value))
-            elif t.type == 'ID' or t.type in KEYWORDS:
-                mapped.append((t.type, t.value))
+            # 1. 关键字、标识符、赋值号、数字保持原类型
+            if t.type in ('ASSIGN', 'NUMBER', 'ID') or t.type in KEYWORDS:
+                mapped.append((t.type, t.value, t.line))
+            # 2. 运算符和界符，为了配合 Parser 逻辑，可以保留原值或转为 SYMBOL
             else:
-                # 将所有运算符/界符统一为 SYMBOL，保留原始字符作为 value
                 if t.type in ('LE', 'GE'):
-                    # <=, >=
                     symval = '<=' if t.type == 'LE' else '>='
-                    mapped.append(('SYMBOL', symval))
-                elif t.type in ('EQ', 'NE', 'LT', 'GT', 'PLUS', 'MINUS', 'TIMES', 'SLASH', 'LPAREN', 'RPAREN', 'COMMA', 'PERIOD', 'SEMICOLON'):
-                    mapped.append(('SYMBOL', t.value))
+                    mapped.append(('SYMBOL', symval, t.line))
+                elif t.type in ('EQ', 'NE', 'LT', 'GT', 'PLUS', 'MINUS', 'TIMES', 'SLASH', 
+                                'LPAREN', 'RPAREN', 'COMMA', 'PERIOD', 'SEMICOLON'):
+                    mapped.append(('SYMBOL', t.value, t.line))
                 else:
-                    # 保留原样作为后备（便于调试和向后兼容）
-                    mapped.append((t.type, t.value))
+                    mapped.append((t.type, t.value, t.line))
 
         return mapped
-
-# ==========================================
-# 3. 验证与测试
-# ==========================================
-
-if __name__ == '__main__':
-    # 构造一个包含错误的测试用例：
-    # 1. 正常的赋值
-    # 2. 一个溢出的大整数 (99999999999)
-    # 3. 几个非法字符 (&, @)
-    # 4. 正常的结束符
-    bad_code = """
-    var x, y;
-    begin
-        x := 99999999999;  (* 错误1：数值溢出 *)
-        y := x + & @ 5;    (* 错误2：非法字符 & 和 @ *)
-    end.
-    """
-
-    print("=== 开始词法分析 ===")
-    lexer = Lexer(bad_code)
-    tokens = lexer.tokenize()
-
-    # 1. 输出生成的 Token (证明即使有错，分析器也跑完了)
-    print("\n[Generated Tokens]")
-    print(f"{'LINE':<5} {'TYPE':<15} {'VALUE'}")
-    print("-" * 30)
-    for token in tokens:
-        print(f"{token.line:<5} {token.type:<15} {token.value}")
-
-    # 2. 输出错误报告
-    print("\n[Error Report]")
-    lexer.print_errors()
-    
-    if lexer.has_error():
-        print("\nResult: Compilation failed due to lexical errors.")
-    else:
-        print("\nResult: Success.")

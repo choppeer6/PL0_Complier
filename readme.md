@@ -55,6 +55,8 @@ pip install streamlit
 Bash
 
 ```
+PS D:\Program Files\github\PL0_Complier> .\.venv\Scripts\activate    //进入虚拟环境
+
 streamlit run app.py
 
 or
