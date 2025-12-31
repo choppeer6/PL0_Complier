@@ -1,0 +1,17 @@
+// 示例3: 条件语句
+// 找出两个数中的最大值
+
+var a, b, max;
+begin
+    a := 25;
+    b := 18;
+    
+    if a > b then
+        max := a;
+    
+    if b > a then
+        max := b;
+    
+    write(max)
+end.
+

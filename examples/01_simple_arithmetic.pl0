@@ -1,0 +1,11 @@
+// 示例1: 简单的算术运算
+// 计算两个数的和
+
+var x, y, sum;
+begin
+    x := 10;
+    y := 20;
+    sum := x + y;
+    write(sum)
+end.
+

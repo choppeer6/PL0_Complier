@@ -1,0 +1,21 @@
+// 示例9: 斐波那契数列
+// 计算斐波那契数列的第 n 项
+
+var n, fib1, fib2, temp, i;
+begin
+    n := 10;
+    fib1 := 0;
+    fib2 := 1;
+    i := 2;
+    
+    while i <= n do
+    begin
+        temp := fib1 + fib2;
+        fib1 := fib2;
+        fib2 := temp;
+        i := i + 1
+    end;
+    
+    write(fib2)
+end.
+

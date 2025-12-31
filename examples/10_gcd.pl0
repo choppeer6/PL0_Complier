@@ -1,0 +1,18 @@
+// 示例10: 最大公约数 (GCD)
+// 使用欧几里得算法计算两个数的最大公约数
+
+var a, b, temp;
+begin
+    a := 48;
+    b := 18;
+    
+    while b # 0 do
+    begin
+        temp := b;
+        b := a - (a / b) * b;
+        a := temp
+    end;
+    
+    write(a)
+end.
+

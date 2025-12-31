@@ -1,0 +1,18 @@
+// 示例6: 过程调用
+// 使用过程实现简单的计数器
+
+var counter;
+
+procedure increment;
+begin
+    counter := counter + 1
+end;
+
+begin
+    counter := 0;
+    call increment;
+    call increment;
+    call increment;
+    write(counter)
+end.
+

@@ -1,0 +1,11 @@
+// 示例2: 常量定义
+// 使用常量计算圆的周长
+
+const pi = 314, hundred = 100;
+var radius, circumference;
+begin
+    radius := 5;
+    circumference := 2 * pi * radius / hundred;
+    write(circumference)
+end.
+

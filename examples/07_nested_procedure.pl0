@@ -1,0 +1,24 @@
+// 示例7: 嵌套过程
+// 演示多层嵌套的过程定义和调用
+
+var result;
+
+procedure outer;
+var x;
+
+procedure inner;
+begin
+    x := x * 2
+end;
+
+begin
+    x := 5;
+    call inner;
+    result := x
+end;
+
+begin
+    call outer;
+    write(result)
+end.
+

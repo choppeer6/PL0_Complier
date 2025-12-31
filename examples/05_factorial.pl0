@@ -1,0 +1,17 @@
+// 示例5: 阶乘计算
+// 计算 n! (n 的阶乘)
+
+var n, factorial;
+begin
+    n := 5;
+    factorial := 1;
+    
+    while n > 0 do
+    begin
+        factorial := factorial * n;
+        n := n - 1
+    end;
+    
+    write(factorial)
+end.
+

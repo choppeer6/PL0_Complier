@@ -1,0 +1,16 @@
+// 示例8: ODD 函数
+// 判断数字的奇偶性
+
+var num;
+begin
+    num := 7;
+    
+    if odd num then
+        write(1);
+    
+    num := 8;
+    
+    if odd num then
+        write(0)
+end.
+
